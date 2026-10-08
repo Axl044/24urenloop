@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>24-urenloop – inloggen</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="login">
+  <h1>24-urenloop</h1>
+  <p class="muted">Geef je code in.</p>
+  <form id="f">
+    <input id="pin" type="password" inputmode="numeric" autocomplete="current-password" autofocus required>
+    <button class="primary" type="submit">Inloggen</button>
+  </form>
+</div>
+<div id="error" class="error-bar"></div>
+<script src="/static/common.js"></script>
+<script>
+document.getElementById("f").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const pin = document.getElementById("pin");
+  try {
+    const r = await App.api("/api/login", { pin: pin.value });
+    const next = new URLSearchParams(location.search).get("next");
+    const allowed = r.role === "admin" ? ["/beheer", "/teller"] : ["/teller"];
+    location.href = allowed.includes(next) ? next : allowed[0];
+  } catch (err) {
+    showError(err.message);
+    pin.select();
+  }
+});
+</script>
+</body>
+</html>

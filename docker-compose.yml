@@ -1,0 +1,12 @@
+services:
+  24urenloop:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"   # achter je reverse proxy (nginx/caddy/traefik)
+    environment:
+      TZ: Europe/Brussels
+      TELLER_PIN: ${TELLER_PIN:?zet TELLER_PIN in .env}
+      ADMIN_PIN: ${ADMIN_PIN:?zet ADMIN_PIN in .env}
+    volumes:
+      - ./data:/data

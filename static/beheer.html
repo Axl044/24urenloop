@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>24-urenloop – wachtlijst</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="admin-head">
+  <div class="row">
+    <strong>24-urenloop</strong>
+    <span id="badge" class="badge idle">niet gestart</span>
+    <span id="conn" class="dot"></span>
+  </div>
+  <div><span class="muted">Verstreken</span> <span id="clock" class="clock mono">0:00:00</span></div>
+  <div class="row">
+    <a href="/teller"><button type="button">Tellerscherm</button></a>
+    <button type="button" onclick="logout()">Uitloggen</button>
+  </div>
+</header>
+
+<main class="admin-grid">
+  <section class="col">
+    <div class="card">
+      <h2>Loper toevoegen</h2>
+      <form id="add" class="add-form">
+        <input id="add-name" placeholder="Naam" autocomplete="off" required>
+        <select id="add-gang" required></select>
+        <button class="primary" type="submit">Toevoegen</button>
+      </form>
+      <p id="no-gangs" class="warn-text" hidden>Voeg eerst gangen toe (rechts).</p>
+    </div>
+
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <h2>Wachtlijst (<span id="qlen">0</span>)</h2>
+        <span class="muted">Sleep of gebruik de pijltjes om de volgorde aan te passen</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th></th><th>#</th><th>Naam</th><th>Gang</th><th>Wacht</th><th></th></tr></thead>
+          <tbody id="queue"></tbody>
+        </table>
+      </div>
+      <p id="queue-empty" class="warn-text" hidden>De wachtlijst is leeg!</p>
+    </div>
+  </section>
+
+  <section class="col">
+    <div class="card now-box">
+      <h2>Nu aan het lopen</h2>
+      <div id="cur-name" class="name">–</div>
+      <div id="cur-gang" class="muted"></div>
+      <div id="cur-time" class="laptime mono">0:00</div>
+      <div id="laps-done" class="muted"></div>
+      <div class="row" id="event-buttons" style="margin-top:8px"></div>
+    </div>
+
+    <div class="card">
+      <h2>Gangen</h2>
+      <form id="gang-form" class="row">
+        <input id="gang-name" placeholder="Nieuwe gang" autocomplete="off" required style="flex:1">
+        <button type="submit">Toevoegen</button>
+      </form>
+      <div id="gangs" class="chips"></div>
+    </div>
+
+    <div class="card">
+      <h2>Laatste rondes</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>#</th><th>Naam</th><th>Gang</th><th>Start</th><th>Tijd</th><th></th></tr></thead>
+          <tbody id="laps"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <h2>Statistieken</h2>
+        <div class="row">
+          <button type="button" id="stats-btn">Vernieuwen</button>
+          <a href="/export/laps.csv"><button type="button">Export CSV</button></a>
+        </div>
+      </div>
+      <div id="stats" class="stats-grid"><p class="muted">Klik op vernieuwen.</p></div>
+    </div>
+
+    <details class="card">
+      <summary>Gevaarlijke zone</summary>
+      <p class="muted">Reset wist alle rondes (wachtlijst en gangen blijven). Kan enkel als het event niet loopt.
+        Er worden automatisch backups gemaakt in <code>data/backups</code>.</p>
+      <div id="reset-slot"></div>
+    </details>
+  </section>
+</main>
+<div id="error" class="error-bar"></div>
+
+<script src="/static/common.js"></script>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let S = null;          // laatste admin-status
+let editing = null;    // {kind:'queue'|'lap', id} – tijdens bewerken die tabel niet hertekenen
+let lastQueueKey = "", lastLapsKey = "", lastGangsKey = "", lastEventKey = "";
+let gen = 0;           // verhoogd bij elke wijziging, zodat een trage poll niets terugzet
+
+async function act(path, body) {
+  try {
+    const s = await App.api(path, body || {});
+    gen++;
+    if (s.queue) apply(s); else poll();
+    return true;
+  } catch (e) {
+    showError(e.message);
+    poll();
+    return false;
+  }
+}
+
+async function poll() {
+  const g = gen;
+  try {
+    const s = await App.api("/api/admin");
+    if (g === gen) apply(s);
+  } catch (e) { /* stip toont de verbinding */ }
+}
+
+function apply(s) {
+  S = s;
+  renderGangs();
+  renderQueue();
+  renderLaps();
+  renderEventButtons();
+  tick();
+}
+
+function gangSelect(value, id) {
+  const sel = h("select", id ? { id } : {});
+  const names = S.gangs.map((g) => g.name);
+  if (value && !names.includes(value)) names.unshift(value);
+  for (const n of names) sel.append(h("option", { value: n }, n));
+  if (value != null) sel.value = value;
+  return sel;
+}
+
+function renderGangs() {
+  const key = JSON.stringify(S.gangs);
+  if (key === lastGangsKey) return;
+  lastGangsKey = key;
+  const wrap = $("gangs");
+  wrap.replaceChildren(...S.gangs.map((g) =>
+    h("span", { class: "chip" }, g.name,
+      armedButton("✕", "wis?", () => act("/api/admin/gangs/delete", { id: g.id })))));
+  // Selectie in het toevoegformulier behouden.
+  const old = $("add-gang").value;
+  const sel = gangSelect(null, "add-gang");
+  sel.required = true;
+  if (S.gangs.some((g) => g.name === old)) sel.value = old;
+  $("add-gang").replaceWith(sel);
+  $("no-gangs").hidden = S.gangs.length > 0;
+}
+
+// ---------------------------------------------------------------- wachtlijst
+let dragId = null;
+
+function renderQueue() {
+  $("qlen").textContent = S.queue.length;
+  $("queue-empty").hidden = S.queue.length > 0 || S.state !== "running";
+  if (editing && editing.kind === "queue") return;
+  const key = JSON.stringify(S.queue) + lastGangsKey;
+  if (key === lastQueueKey) return;
+  lastQueueKey = key;
+  const body = $("queue");
+  body.replaceChildren(...S.queue.map((r, i) => queueRow(r, i)));
+}
+
+function queueRow(r, i) {
+  const q = S.queue;
+  const up = i > 0 ? q[i - 1].id : undefined;
+  const down = i < q.length - 1 ? (i + 2 < q.length ? q[i + 2].id : null) : undefined;
+  const tr = h("tr", { draggable: "true", class: i < 2 ? "next-up" : "", "data-id": r.id },
+    h("td", { class: "handle", title: "Sleep" }, "⠿"),
+    h("td", { class: "mono" }, i + 1),
+    h("td", {}, r.name),
+    h("td", {}, r.gang),
+    h("td", { class: "mono muted wait", "data-added": r.added_ms }, ""),
+    h("td", { class: "actions" },
+      h("button", { type: "button", title: "Bovenaan", disabled: i === 0,
+        onclick: () => act("/api/admin/queue/move", { id: r.id, before: q[0].id }) }, "⤒"),
+      h("button", { type: "button", title: "Omhoog", disabled: up === undefined,
+        onclick: () => act("/api/admin/queue/move", { id: r.id, before: up }) }, "↑"),
+      h("button", { type: "button", title: "Omlaag", disabled: down === undefined,
+        onclick: () => act("/api/admin/queue/move", { id: r.id, before: down }) }, "↓"),
+      h("button", { type: "button", title: "Bewerken", onclick: () => editQueue(tr, r) }, "✎"),
+      armedButton("✕", "wis?", () => act("/api/admin/queue/delete", { id: r.id }), "danger")));
+
+  tr.addEventListener("dragstart", (e) => { dragId = r.id; tr.classList.add("dragging"); e.dataTransfer.effectAllowed = "move"; });
+  tr.addEventListener("dragend", () => { dragId = null; tr.classList.remove("dragging"); clearDrag(); });
+  tr.addEventListener("dragover", (e) => {
+    if (dragId == null || dragId === r.id) return;
+    e.preventDefault();
+    clearDrag();
+    tr.classList.add(isTopHalf(e, tr) ? "drag-over-top" : "drag-over-bottom");
+  });
+  tr.addEventListener("dragleave", () => tr.classList.remove("drag-over-top", "drag-over-bottom"));
+  tr.addEventListener("drop", (e) => {
+    e.preventDefault();
+    clearDrag();
+    if (dragId == null || dragId === r.id) return;
+    const before = isTopHalf(e, tr) ? r.id : (i + 1 < q.length ? q[i + 1].id : null);
+    if (before !== dragId) act("/api/admin/queue/move", { id: dragId, before });
+  });
+  return tr;
+}
+
+function isTopHalf(e, el) {
+  const b = el.getBoundingClientRect();
+  return e.clientY < b.top + b.height / 2;
+}
+function clearDrag() {
+  document.querySelectorAll(".drag-over-top,.drag-over-bottom")
+    .forEach((x) => x.classList.remove("drag-over-top", "drag-over-bottom"));
+}
+
+function editQueue(tr, r) {
+  editing = { kind: "queue", id: r.id };
+  const name = h("input", { value: r.name });
+  const gang = gangSelect(r.gang);
+  const done = () => { editing = null; lastQueueKey = ""; renderQueue(); };
+  const save = async () => { if (await act("/api/admin/queue/update", { id: r.id, name: name.value, gang: gang.value })) done(); };
+  name.addEventListener("keydown", (e) => { if (e.key === "Enter") save(); if (e.key === "Escape") done(); });
+  tr.draggable = false;
+  tr.replaceChildren(h("td"), h("td"), h("td", {}, name), h("td", {}, gang), h("td"),
+    h("td", { class: "actions" },
+      h("button", { type: "button", class: "primary", onclick: save }, "Opslaan"),
+      h("button", { type: "button", onclick: done }, "Annuleer")));
+  name.focus();
+}
+
+// ---------------------------------------------------------------- rondes
+function renderLaps() {
+  if (editing && editing.kind === "lap") return;
+  const key = JSON.stringify(S.laps) + lastGangsKey;
+  if (key === lastLapsKey) return;
+  lastLapsKey = key;
+  $("laps").replaceChildren(...S.laps.map((l) => {
+    const tr = h("tr", {},
+      h("td", { class: "mono" }, l.seq),
+      h("td", { class: l.name === "?" ? "warn-text" : "" }, l.name),
+      h("td", {}, l.gang),
+      h("td", { class: "mono muted" }, fmtTime(l.start_ms)),
+      h("td", { class: "mono" + (l.end_ms ? "" : " live-lap"), "data-start": l.start_ms }, l.end_ms ? fmtDur(l.end_ms - l.start_ms) : ""),
+      h("td", { class: "actions" }, h("button", { type: "button", title: "Naam/gang corrigeren", onclick: () => editLap(tr, l) }, "✎")));
+    return tr;
+  }));
+}
+
+function editLap(tr, l) {
+  editing = { kind: "lap", id: l.id };
+  const name = h("input", { value: l.name === "?" ? "" : l.name });
+  const gang = gangSelect(l.gang);
+  const done = () => { editing = null; lastLapsKey = ""; renderLaps(); };
+  const save = async () => { if (await act("/api/admin/laps/update", { id: l.id, name: name.value, gang: gang.value })) done(); };
+  name.addEventListener("keydown", (e) => { if (e.key === "Enter") save(); if (e.key === "Escape") done(); });
+  tr.replaceChildren(h("td", { class: "mono" }, l.seq), h("td", {}, name), h("td", {}, gang), h("td"), h("td"),
+    h("td", { class: "actions" },
+      h("button", { type: "button", class: "primary", onclick: save }, "Opslaan"),
+      h("button", { type: "button", onclick: done }, "Annuleer")));
+  name.focus();
+}
+
+// ---------------------------------------------------------------- event
+function renderEventButtons() {
+  const cur = S.current;
+  const key = S.state + "|" + (cur ? cur.id : "") + "|" + (S.previous ? S.previous.id : "");
+  if (key === lastEventKey) return;
+  lastEventKey = key;
+  const box = $("event-buttons");
+  box.replaceChildren();
+  if (S.state === "idle") {
+    box.append(armedButton("▶ Start event", "Zeker? Eerste loper vertrekt nu", () => act("/api/admin/start"), "primary"));
+  } else if (S.state === "running") {
+    box.append(h("button", { type: "button", class: "primary", onclick: () => passFromAdmin() }, "Wissel"));
+    if (cur && cur.seq > 1) {
+      box.append(armedButton("Laatste wissel ongedaan maken", "Zeker?", () => act("/api/undo", { lap_id: cur.id })));
+    }
+    box.append(armedButton("■ Stop event", "Zeker? Event stoppen", () => act("/api/admin/stop"), "danger"));
+  }
+  const slot = $("reset-slot");
+  slot.replaceChildren(armedButton("Reset alle rondes", "Zeker? Alles wissen", () => act("/api/admin/reset", { confirm: "RESET" }), "danger"));
+}
+
+async function passFromAdmin() {
+  try {
+    await App.api("/api/pass", { id: uid(), ts: Math.round(App.serverNow()) });
+    gen++;
+  } catch (e) { showError(e.message); }
+  poll();
+}
+
+function tick() {
+  $("conn").className = "dot" + (App.connected() ? " ok" : "");
+  if (!S) return;
+  const now = App.serverNow();
+  const badge = $("badge");
+  badge.className = "badge " + S.state;
+  badge.textContent = { idle: "niet gestart", running: "bezig", finished: "afgelopen" }[S.state];
+  const end = S.state === "finished" ? S.end_ms : now;
+  $("clock").textContent = S.start_ms ? fmtClock(end - S.start_ms) : "0:00:00";
+  const cur = S.current;
+  $("cur-name").textContent = cur ? cur.name : (S.state === "idle" ? (S.queue[0] ? "Start: " + S.queue[0].name : "–") : "–");
+  $("cur-gang").textContent = cur ? cur.gang : "";
+  $("cur-time").textContent = cur ? fmtDur(now - cur.start_ms) : "0:00";
+  $("laps-done").textContent = S.laps_done + " rondes voltooid";
+  document.querySelectorAll("td.wait").forEach((td) => { td.textContent = fmtDur(now - Number(td.dataset.added)); });
+  document.querySelectorAll("td.live-lap").forEach((td) => { td.textContent = fmtDur(now - Number(td.dataset.start)) + " …"; });
+}
+
+// ---------------------------------------------------------------- statistieken
+async function loadStats() {
+  let st;
+  try { st = await App.api("/api/stats"); } catch (e) { showError(e.message); return; }
+  const t = st.total;
+  const table = (head, rows) => h("div", { class: "table-wrap" }, h("table", {},
+    h("thead", {}, h("tr", {}, head.map((x) => h("th", {}, x)))),
+    h("tbody", {}, rows.map((r) => h("tr", {}, r.map((x) => h("td", { class: "mono" }, x)))))));
+  $("stats").replaceChildren(
+    h("div", { class: "kpis" },
+      kpi(t.n, "rondes"), kpi(fmtDur(t.avg), "gemiddeld"), kpi(fmtDur(t.best), "snelste"), kpi(fmtDur(t.worst), "traagste")),
+    h("h3", {}, "Per gang"),
+    table(["Gang", "Rondes", "Lopers", "Gem.", "Snelste", "Totaal"],
+      st.gangs.map((g) => [g.gang || "(geen)", g.n, g.runners, fmtDur(g.avg), fmtDur(g.best), fmtClock(g.total)])),
+    h("h3", {}, "Per loper (snelste eerst)"),
+    table(["Naam", "Gang", "Rondes", "Gem.", "Snelste"],
+      st.runners.map((r) => [r.name, r.gang, r.n, fmtDur(r.avg), fmtDur(r.best)])),
+    h("h3", {}, "Rondes per uur"),
+    table(["Uur", "Rondes"], st.hours.map((x) => [(x.hour + 1) + "e uur", x.n])));
+}
+function kpi(v, l) { return h("div", { class: "kpi" }, h("div", { class: "v mono" }, v ?? "–"), h("div", { class: "l" }, l)); }
+$("stats-btn").addEventListener("click", loadStats);
+
+// ---------------------------------------------------------------- formulieren
+$("add").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const name = $("add-name");
+  if (await act("/api/admin/queue/add", { name: name.value, gang: $("add-gang").value })) {
+    name.value = "";
+  }
+  name.focus();
+});
+
+$("gang-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const name = $("gang-name");
+  if (await act("/api/admin/gangs/add", { name: name.value })) name.value = "";
+  name.focus();
+});
+
+poll();
+setInterval(poll, 2000);
+setInterval(tick, 500);
+</script>
+</body>
+</html>

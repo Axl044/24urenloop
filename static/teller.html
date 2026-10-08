@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#138a36">
+<title>24-urenloop – teller</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="teller">
+<div class="teller-wrap">
+  <div class="teller-top">
+    <div><span class="muted">Verstreken</span><br><span id="clock" class="clock mono">0:00:00</span></div>
+    <div style="text-align:right"><span id="conn" class="dot"></span> <span id="laps" class="muted"></span><br>
+      <span id="pending" class="warn-text"></span></div>
+  </div>
+
+  <div id="msg" class="card status-msg" hidden></div>
+
+  <div id="live">
+    <div class="card now-card">
+      <div class="label">Nu aan het lopen</div>
+      <div id="cur-name" class="name">–</div>
+      <div id="cur-gang" class="gang"></div>
+      <div id="cur-time" class="laptime mono">0:00</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Volgende</h2>
+    <div id="next" class="next-list"></div>
+  </div>
+
+  <div id="prev" class="prev-line"></div>
+
+  <button id="pass" class="big-btn" type="button" disabled>WISSEL</button>
+
+  <div class="teller-bottom">
+    <button id="undo" type="button" hidden>Ongedaan maken</button>
+    <span></span>
+    <button type="button" onclick="logout()">Uitloggen</button>
+  </div>
+</div>
+<div id="error" class="error-bar"></div>
+
+<script src="/static/common.js"></script>
+<script>
+"use strict";
+// Wissels die nog niet door de server bevestigd zijn. Bewaard in localStorage zodat ze
+// een herlaad of wegvallend netwerk overleven; elke wissel heeft een uniek id zodat de
+// server hem nooit dubbel telt.
+const PENDING_KEY = "24ul-pending";
+let pending = [];
+try { pending = JSON.parse(localStorage.getItem(PENDING_KEY) || "[]"); } catch (e) { pending = []; }
+function savePending() {
+  try { localStorage.setItem(PENDING_KEY, JSON.stringify(pending)); } catch (e) { /* geen opslag */ }
+}
+
+let state = null;
+let flushing = false;
+let undoArmed = 0;
+
+const $ = (id) => document.getElementById(id);
+
+// Wat de teller ziet = serverstatus + nog niet bevestigde wissels.
+function view() {
+  if (!state) return null;
+  let cur = state.current, prev = state.previous;
+  const next = state.next.slice();
+  for (const p of pending) {
+    if (cur) prev = { name: cur.name, start_ms: cur.start_ms, end_ms: p.ts };
+    const n = next.shift();
+    cur = { id: null, name: n ? n.name : "?", gang: n ? n.gang : "", start_ms: p.ts };
+  }
+  return { cur, prev, next };
+}
+
+function render() {
+  const now = App.serverNow();
+  $("conn").className = "dot" + (App.connected() ? " ok" : "");
+  $("pending").textContent = pending.length ? pending.length + " wissel(s) nog niet verzonden" : "";
+  if (!state) return;
+
+  const running = state.state === "running";
+  const end = state.state === "finished" ? state.end_ms : now;
+  $("clock").textContent = state.start_ms ? fmtClock(end - state.start_ms) : "0:00:00";
+  $("laps").textContent = (state.laps_done + pending.length) + " wissels";
+
+  const msg = $("msg");
+  if (state.state === "idle") { msg.hidden = false; msg.textContent = "Wachten tot de beheerder het event start…"; }
+  else if (state.state === "finished") { msg.hidden = false; msg.textContent = "Het event is afgelopen. Bedankt!"; }
+  else msg.hidden = true;
+
+  const v = view();
+  $("cur-name").textContent = v.cur ? v.cur.name : "–";
+  $("cur-gang").textContent = v.cur ? v.cur.gang : "";
+  $("cur-time").textContent = v.cur && running ? fmtDur(now - v.cur.start_ms) : "0:00";
+
+  const next = $("next");
+  next.replaceChildren();
+  for (let i = 0; i < 2; i++) {
+    const r = v.next[i];
+    next.append(h("div", { class: "next-row" },
+      h("span", { class: "n" }, (i + 1) + "."),
+      h("span", { class: "nm" }, r ? r.name : "—"),
+      h("span", { class: "g" }, r ? r.gang : "")));
+  }
+  if (running && v.next.length === 0) next.append(h("div", { class: "warn-text" }, "Wachtlijst is leeg!"));
+
+  $("prev").textContent = v.prev && v.prev.end_ms
+    ? "Vorige: " + v.prev.name + " – " + fmtDur(v.prev.end_ms - v.prev.start_ms) : "";
+
+  $("pass").disabled = !running;
+
+  // Ongedaan maken: enkel voor de laatste, al bevestigde wissel en binnen het tijdvenster.
+  const undo = $("undo");
+  const cur = state.current;
+  const left = cur && cur.seq > 1 ? state.undo_ms - (now - cur.start_ms) : 0;
+  if (running && !pending.length && left > 0) {
+    undo.hidden = false;
+    const armed = Date.now() < undoArmed;
+    undo.className = armed ? "armed" : "";
+    undo.textContent = armed ? "Zeker? Tik nogmaals" : "Ongedaan maken (" + Math.ceil(left / 1000) + "s)";
+  } else {
+    undo.hidden = true;
+  }
+}
+
+async function poll() {
+  if (!flushing) {
+    try {
+      const s = await App.api("/api/state");
+      // Een trage poll mag een recenter antwoord (van een wissel) niet overschrijven.
+      if (!flushing && (!state || s.now >= state.now)) state = s;
+    } catch (e) { /* verbinding wordt getoond via de stip */ }
+  }
+  render();
+}
+
+async function flush() {
+  if (flushing) return;
+  flushing = true;
+  try {
+    while (pending.length) {
+      const p = pending[0];
+      try {
+        const r = await App.api("/api/pass", { id: p.id, ts: p.ts });
+        state = r.state;
+      } catch (e) {
+        if (e.status === 0 || e.status >= 500 || e.status === 401) {
+          setTimeout(flush, 2000); // later opnieuw proberen, met hetzelfde id
+          break;
+        }
+        showError(e.message); // door de server geweigerd (bv. dubbele klik): niet opnieuw sturen
+      }
+      pending.shift();
+      savePending();
+    }
+  } finally {
+    flushing = false;
+    render();
+  }
+}
+
+$("pass").addEventListener("click", () => {
+  if (!state || state.state !== "running") return;
+  const ts = Math.round(App.serverNow());
+  const v = view();
+  if (v.cur && ts - v.cur.start_ms < state.min_lap_ms) {
+    showError("Te snel na de vorige wissel – genegeerd");
+    return;
+  }
+  pending.push({ id: uid(), ts });
+  savePending();
+  if (navigator.vibrate) navigator.vibrate(80);
+  const btn = $("pass");
+  btn.classList.add("flash");
+  setTimeout(() => btn.classList.remove("flash"), 250);
+  render();
+  flush();
+});
+
+$("undo").addEventListener("click", async () => {
+  if (Date.now() >= undoArmed) { undoArmed = Date.now() + 3000; render(); return; }
+  undoArmed = 0;
+  if (!state || !state.current || pending.length) return;
+  try {
+    const r = await App.api("/api/undo", { lap_id: state.current.id });
+    state = r.state;
+  } catch (e) {
+    showError(e.message);
+  }
+  render();
+});
+
+// Scherm wakker houden.
+let wakeLock = null;
+async function keepAwake() {
+  try {
+    if ("wakeLock" in navigator && document.visibilityState === "visible" && !wakeLock) {
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeLock.addEventListener("release", () => { wakeLock = null; });
+    }
+  } catch (e) { /* niet ondersteund */ }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") { keepAwake(); poll(); flush(); }
+});
+document.addEventListener("click", keepAwake);
+
+keepAwake();
+poll().then(flush);
+setInterval(poll, 2000);
+setInterval(render, 250);
+</script>
+</body>
+</html>
