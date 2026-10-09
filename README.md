@@ -28,6 +28,70 @@ De app luistert op poort 8080. Zet er een reverse proxy met HTTPS voor (bv. `24u
 }
 ```
 
+## Offline ter plaatse, alleen-lezen online
+
+Ter plaatse draait alles op een laptop, zonder internet nodig: gsm's en laptop hangen aan hetzelfde wifi-netwerk (bv. een reisrouter). Online komt enkel een **statisch scorebord** zonder schrijfmogelijkheden.
+
+```
+gsm (teller) ──wifi──▶ laptop :8080 ──▶ data/public/{index.html, scorebord.json}
+tv / beamer  ──wifi──▶ laptop :8080/scorebord          │
+                                                       │ sync/push.sh (rsync over Tailscale)
+                                                       ▼
+                                   thuisserver: Caddy/nginx serveert enkel die 2 bestanden
+```
+
+### 1. Laptop
+
+```bash
+cp .env.example .env    # codes invullen, COMPOSE_FILE en BACKUP_PATH aanzetten
+docker compose up -d --build
+```
+
+`docker-compose.laptop.yml` maakt de app bereikbaar op het lokale netwerk (`http://<ip-van-laptop>:8080`), schrijft de backups naar `BACKUP_PATH` (bv. een USB-stick) en schrijft elke 10 s de publieke export naar `data/public/`. Steek de stick in vóór je de container start, anders maakt Docker een gewone map op die plek.
+
+### 2. Lokaal scorebord
+
+`http://<ip-van-laptop>:8080/scorebord` werkt zonder login, voor een tv of beamer. Het toont de huidige loper, de volgende 3, de laatste rondes en de stats per gang, per uur en per loper. Werkt ook als het internet wegvalt.
+
+### 3. Sync naar de thuisserver
+
+De laptop pusht met rsync over ssh, via Tailscale. Op de thuisserver komt dus geen sync-endpoint en geen app, enkel een map met bestanden.
+
+Op de thuisserver, eenmalig:
+
+```bash
+sudo useradd -m -s /bin/sh deploy
+sudo install -d -o deploy -m 755 /srv/24urenloop-public
+```
+
+Zet de publieke sleutel van de laptop in `~deploy/.ssh/authorized_keys`, beperkt tot rsync in die ene map (`rrsync` zit bij rsync):
+
+```
+command="rrsync /srv/24urenloop-public",restrict ssh-ed25519 AAAA... laptop-24urenloop
+```
+
+Op oudere Debian/Ubuntu staat rrsync in `/usr/share/doc/rsync/scripts/` in plaats van in het `PATH`.
+
+Caddy serveert de map, enkel om te lezen. Dit vervangt de reverse proxy van hierboven: de app zelf staat dan niet meer online.
+
+```
+24urenloop.axlquirijnen.be {
+    root * /srv/24urenloop-public
+    @write not method GET HEAD
+    respond @write 405
+    header /scorebord.json Cache-Control "no-cache"
+    file_server
+}
+```
+
+Op de laptop (met Tailscale verbonden):
+
+```bash
+SYNC_TARGET=deploy@thuisserver: ./sync/push.sh
+```
+
+Het script pusht elke 15 s (`SYNC_SECONDS`) en blijft opnieuw proberen als het internet wegvalt. Het scorebord toont hoe oud de gegevens zijn, en waarschuwt als ze ouder zijn dan 2 minuten.
+
 ## Verloop
 
 1. De beheerder logt in met `ADMIN_PIN`, maakt de gangen aan en vult de wachtlijst.
@@ -57,6 +121,9 @@ De app luistert op poort 8080. Zet er een reverse proxy met HTTPS voor (bv. `24u
 | `UNDO_SECONDS` | `60` | hoelang de teller kan terugdraaien |
 | `BACKUP_MINUTES` / `BACKUP_KEEP` | `5` / `100` | `0` minuten = geen backups |
 | `SECRET` | automatisch | sleutel voor cookies (anders bewaard in de db) |
+| `BACKUP_DIR` | `<map van DB_PATH>/backups` | |
+| `PUBLIC_DIR` | leeg (uit) | map voor de publieke export (`index.html` + `scorebord.json`) |
+| `PUBLIC_SECONDS` | `10` | hoe vaak de publieke export ververst |
 
 ## Statistieken
 

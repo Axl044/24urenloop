@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>24-urenloop – scorebord</title>
+<!-- Volledig op zichzelf staand (geen externe css/js): dit bestand wordt ook als statische
+     index.html naar de publieke site gekopieerd, naast scorebord.json. -->
+<style>
+:root {
+  --bg: #f4f5f7; --card: #ffffff; --text: #15171a; --muted: #646a73; --line: #dde0e5;
+  --accent: #1f6feb; --ok: #138a36; --warn: #b35900;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #101214; --card: #1b1e22; --text: #f1f3f5; --muted: #9aa1ab; --line: #2d3238;
+          --accent: #4b8ef7; --ok: #3ccf6a; --warn: #f0a040; }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); }
+body { font-size: clamp(15px, 1.15vw, 22px); line-height: 1.35; }
+.mono { font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+header { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: baseline; justify-content: space-between;
+         padding: 16px; border-bottom: 1px solid var(--line); background: var(--card); }
+header h1 { margin: 0; font-size: 1.6em; }
+.clock { font-size: 2.2em; font-weight: 800; }
+.total { font-size: 2.2em; font-weight: 800; }
+main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr); gap: 16px; padding: 16px; }
+@media (max-width: 1100px) { main { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+@media (max-width: 700px) { main { grid-template-columns: minmax(0, 1fr); } }
+.col { display: grid; gap: 16px; align-content: start; min-width: 0; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; min-width: 0; }
+h2 { margin: 0 0 8px; font-size: .9em; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.now .name { font-size: 2.2em; font-weight: 800; overflow-wrap: anywhere; }
+.now .lap { font-size: 3em; font-weight: 800; }
+#next > div { display: flex; gap: 10px; padding: 3px 0; }
+.next .g, td.g { color: var(--muted); }
+.next .g { margin-left: auto; text-align: right; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 600; font-size: .85em; }
+td.r, th.r { text-align: right; }
+.table-wrap { overflow-x: auto; }
+footer { padding: 0 16px 16px; font-size: .85em; }
+.stale { color: var(--warn); font-weight: 700; }
+.empty { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>24-urenloop</h1>
+  <div><span id="state" class="muted"></span> <span id="clock" class="clock mono">–</span></div>
+  <div><span id="total" class="total mono">0</span> <span class="muted">rondes</span></div>
+</header>
+
+<main>
+  <div class="col">
+    <section class="card now">
+      <h2>Nu aan het lopen</h2>
+      <div id="cur-name" class="name">–</div>
+      <div id="cur-gang" class="muted"></div>
+      <div id="cur-lap" class="lap mono"></div>
+    </section>
+    <section class="card next">
+      <h2>Volgende</h2>
+      <div id="next"></div>
+    </section>
+    <section class="card">
+      <h2>Laatste rondes</h2>
+      <div class="table-wrap"><table id="recent"></table></div>
+    </section>
+  </div>
+  <div class="col">
+    <section class="card">
+      <h2>Per gang</h2>
+      <div class="table-wrap"><table id="gangs"></table></div>
+    </section>
+    <section class="card">
+      <h2>Rondes per uur</h2>
+      <div class="table-wrap"><table id="hours"></table></div>
+    </section>
+  </div>
+  <div class="col">
+    <section class="card">
+      <h2>Snelste lopers</h2>
+      <div class="table-wrap"><table id="fastest"></table></div>
+    </section>
+    <section class="card">
+      <h2>Meeste rondes</h2>
+      <div class="table-wrap"><table id="most"></table></div>
+    </section>
+  </div>
+</main>
+<footer id="updated" class="muted"></footer>
+
+<script>
+"use strict";
+const STALE_MS = 2 * 60 * 1000;
+let D = null;
+let offset = 0;   // servertijd - lokale tijd, uit de Date-header (de gsm/tv-klok kan afwijken)
+let fetchedAt = 0;
+
+const $ = (id) => document.getElementById(id);
+const pad = (n) => String(n).padStart(2, "0");
+function fmtClock(ms) {
+  const s = Math.max(0, Math.floor((ms || 0) / 1000));
+  return Math.floor(s / 3600) + ":" + pad(Math.floor(s / 60) % 60) + ":" + pad(s % 60);
+}
+function fmtDur(ms) {
+  if (ms == null) return "–";
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return s >= 3600 ? fmtClock(ms) : Math.floor(s / 60) + ":" + pad(s % 60);
+}
+function fmtTime(ms) {
+  const d = new Date(ms);
+  return pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+}
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = String(text);   // altijd textContent: geen HTML-injectie
+  return e;
+}
+// cols: [kop, functie(rij) -> waarde, "r" voor rechts uitlijnen]
+function table(id, cols, rows, emptyText) {
+  const t = $(id);
+  if (!rows.length) { t.replaceChildren(el("caption", "empty", emptyText || "Nog geen rondes")); return; }
+  const head = el("tr");
+  for (const [label, , cls] of cols) head.append(el("th", cls, label));
+  const body = rows.map((r, i) => {
+    const tr = el("tr");
+    for (const [, f, cls] of cols) tr.append(el("td", (cls || "") + " mono", f(r, i)));
+    return tr;
+  });
+  t.replaceChildren(el("thead"), el("tbody"));
+  t.tHead.append(head);
+  t.tBodies[0].append(...body);
+}
+const now = () => Date.now() + offset;
+
+async function load() {
+  try {
+    const res = await fetch("scorebord.json", { cache: "no-store" });
+    if (!res.ok) throw new Error(res.status);
+    const date = Date.parse(res.headers.get("Date"));
+    if (!isNaN(date)) offset = date - Date.now();
+    D = await res.json();
+    fetchedAt = Date.now();
+    render();
+  } catch (e) {
+    // Vorige gegevens blijven staan; de footer toont hoe oud ze zijn.
+  }
+  tick();
+}
+
+function render() {
+  const s = D.stats;
+  $("total").textContent = D.laps_done;
+  const cur = D.current;
+  $("cur-name").textContent = cur ? cur.name : "–";
+  $("cur-gang").textContent = cur ? cur.gang : "";
+  $("next").replaceChildren(...(D.next.length ? D.next.map((r, i) => {
+    const row = el("div");
+    row.append(el("span", "muted", i + 1 + "."), el("strong", null, r.name), el("span", "g", r.gang));
+    return row;
+  }) : [el("span", "empty", "–")]));
+
+  table("recent", [["#", (r) => r.seq], ["Naam", (r) => r.name], ["Gang", (r) => r.gang, "g"],
+    ["Tijd", (r) => fmtDur(r.end_ms - r.start_ms), "r"]], D.recent);
+  table("gangs", [["", (r, i) => i + 1], ["Gang", (r) => r.gang || "(geen)"], ["Rondes", (r) => r.n, "r"],
+    ["Gem.", (r) => fmtDur(r.avg), "r"], ["Snelste", (r) => fmtDur(r.best), "r"]], s.gangs);
+  table("hours", [["Uur", (r) => r.hour + 1 + "e uur"], ["Rondes", (r) => r.n, "r"]], s.hours);
+  table("fastest", [["", (r, i) => i + 1], ["Naam", (r) => r.name], ["Gang", (r) => r.gang, "g"],
+    ["Snelste", (r) => fmtDur(r.best), "r"]], s.runners.slice(0, 10));
+  const most = [...s.runners].sort((a, b) => b.n - a.n || a.avg - b.avg).slice(0, 10);
+  table("most", [["", (r, i) => i + 1], ["Naam", (r) => r.name], ["Gang", (r) => r.gang, "g"],
+    ["Rondes", (r) => r.n, "r"]], most);
+}
+
+function tick() {
+  if (!D) { $("updated").textContent = "Gegevens laden…"; return; }
+  const t = now();
+  const label = { idle: "Nog niet gestart", running: "Verstreken", finished: "Afgelopen na" }[D.state] || "";
+  $("state").textContent = label;
+  let clock = "–";
+  if (D.state === "running" && D.start_ms) clock = fmtClock(t - D.start_ms);
+  else if (D.state === "finished" && D.start_ms && D.end_ms) clock = fmtClock(D.end_ms - D.start_ms);
+  $("clock").textContent = clock;
+  $("cur-lap").textContent = D.state === "running" && D.current ? fmtDur(t - D.current.start_ms) : "";
+
+  const age = t - D.generated_ms;
+  const f = $("updated");
+  f.textContent = "Bijgewerkt om " + fmtTime(D.generated_ms) +
+    (age > STALE_MS ? " – geen verse gegevens, de tijden hieronder kunnen achterlopen" : "");
+  f.className = age > STALE_MS || Date.now() - fetchedAt > STALE_MS ? "stale" : "muted";
+}
+
+load();
+setInterval(load, 10000);
+setInterval(tick, 500);
+</script>
+</body>
+</html>

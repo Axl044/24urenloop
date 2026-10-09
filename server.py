@@ -33,6 +33,11 @@ MIN_LAP_MS = int(os.environ.get("MIN_LAP_SECONDS", "5")) * 1000
 UNDO_MS = int(os.environ.get("UNDO_SECONDS", "60")) * 1000
 BACKUP_EVERY_S = int(os.environ.get("BACKUP_MINUTES", "5")) * 60
 BACKUP_KEEP = int(os.environ.get("BACKUP_KEEP", "100"))
+BACKUP_DIR = os.environ.get("BACKUP_DIR") or os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "backups")
+# Map waarin het publieke scorebord (index.html + scorebord.json) periodiek wordt weggeschreven,
+# om met rsync naar de thuisserver te pushen. Leeg = uit.
+PUBLIC_DIR = os.environ.get("PUBLIC_DIR", "")
+PUBLIC_EVERY_S = max(1, int(os.environ.get("PUBLIC_SECONDS", "10")))
 COOKIE_MAX_AGE = 7 * 24 * 3600
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
@@ -332,7 +337,7 @@ def queue_move(c, role, qid, before):
 
 def stats(c):
     dur = "(end_ms - start_ms)"
-    total = c.execute(f"SELECT COUNT(*) n, AVG({dur}) avg, MIN({dur}) best, MAX({dur}) worst "
+    total = c.execute(f"SELECT COUNT(*) n, AVG({dur}) avg, MIN({dur}) best "
                       "FROM laps WHERE end_ms IS NOT NULL").fetchone()
     gangs = c.execute(f"SELECT gang, COUNT(*) n, SUM({dur}) total, AVG({dur}) avg, MIN({dur}) best, "
                       "COUNT(DISTINCT name) runners FROM laps WHERE end_ms IS NOT NULL "
@@ -349,6 +354,26 @@ def stats(c):
         "gangs": [dict(r) for r in gangs],
         "runners": [dict(r) for r in runners],
         "hours": [dict(r) for r in hours],
+    }
+
+
+def scoreboard(c):
+    """Alleen-lezen momentopname voor het publieke scorebord: geen id's, geen wachtlijst."""
+    s = public_state(c)
+    cur = s["current"]
+    nxt = c.execute("SELECT name,gang FROM queue ORDER BY pos, id LIMIT 3").fetchall()
+    recent = c.execute("SELECT seq,name,gang,start_ms,end_ms FROM laps WHERE end_ms IS NOT NULL "
+                       "ORDER BY seq DESC LIMIT 10").fetchall()
+    return {
+        "generated_ms": s["now"],
+        "state": s["state"],
+        "start_ms": s["start_ms"],
+        "end_ms": s["end_ms"],
+        "laps_done": s["laps_done"],
+        "current": {k: cur[k] for k in ("seq", "name", "gang", "start_ms")} if cur else None,
+        "next": [dict(r) for r in nxt],
+        "recent": [dict(r) for r in recent],
+        "stats": stats(c),
     }
 
 
@@ -416,7 +441,7 @@ def login_failed():
 
 # ---------------------------------------------------------------- HTTP
 
-PAGES = {"/login": ("login.html", None), "/teller": ("teller.html", "teller"), "/beheer": ("beheer.html", "admin")}
+PAGES = {"/login": ("login.html", None), "/scorebord": ("scorebord.html", None), "/teller": ("teller.html", "teller"), "/beheer": ("beheer.html", "admin")}
 STATIC_TYPES = {".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                 ".html": "text/html; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png"}
 
@@ -511,6 +536,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.static(fname)
         if path.startswith("/static/"):
             return self.static(path[len("/static/"):])
+        if path == "/scorebord.json":
+            with db.read() as c:
+                return self.json(200, scoreboard(c))
         if path == "/api/state":
             self.need(role, "teller")
             with db.read() as c:
@@ -653,7 +681,7 @@ class Handler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------- backups
 
 def backup_loop():
-    folder = os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "backups")
+    folder = BACKUP_DIR
     os.makedirs(folder, exist_ok=True)
     while True:
         time.sleep(BACKUP_EVERY_S)
@@ -667,6 +695,33 @@ def backup_loop():
             print("Backup mislukt:", repr(e), file=sys.stderr, flush=True)
 
 
+# ---------------------------------------------------------------- publieke export
+
+def write_atomic(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, path)
+
+
+def export_public():
+    with open(os.path.join(STATIC_DIR, "scorebord.html"), "rb") as f:
+        write_atomic(os.path.join(PUBLIC_DIR, "index.html"), f.read())
+    with db.read() as c:
+        data = scoreboard(c)
+    write_atomic(os.path.join(PUBLIC_DIR, "scorebord.json"), json.dumps(data, ensure_ascii=False).encode())
+
+
+def public_loop():
+    os.makedirs(PUBLIC_DIR, exist_ok=True)
+    while True:
+        try:
+            export_public()
+        except Exception as e:
+            print("Publieke export mislukt:", repr(e), file=sys.stderr, flush=True)
+        time.sleep(PUBLIC_EVERY_S)
+
+
 def main():
     if not TELLER_PIN or not ADMIN_PIN:
         sys.exit("Zet de omgevingsvariabelen TELLER_PIN en ADMIN_PIN (verschillend van elkaar).")
@@ -674,6 +729,8 @@ def main():
         sys.exit("TELLER_PIN en ADMIN_PIN moeten verschillend zijn.")
     if BACKUP_EVERY_S > 0:
         threading.Thread(target=backup_loop, daemon=True).start()
+    if PUBLIC_DIR:
+        threading.Thread(target=public_loop, daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     server.daemon_threads = True
     print(f"24-urenloop draait op http://{HOST}:{PORT}  (db: {DB_PATH})", flush=True)

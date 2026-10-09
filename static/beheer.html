@@ -16,6 +16,7 @@
   <div><span class="muted">Verstreken</span> <span id="clock" class="clock mono">0:00:00</span></div>
   <div class="row">
     <a href="/teller"><button type="button">Tellerscherm</button></a>
+    <a href="/scorebord" target="_blank"><button type="button">Scorebord</button></a>
     <button type="button" onclick="logout()">Uitloggen</button>
   </div>
 </header>
@@ -328,7 +329,7 @@ async function loadStats() {
     h("tbody", {}, rows.map((r) => h("tr", {}, r.map((x) => h("td", { class: "mono" }, x)))))));
   $("stats").replaceChildren(
     h("div", { class: "kpis" },
-      kpi(t.n, "rondes"), kpi(fmtDur(t.avg), "gemiddeld"), kpi(fmtDur(t.best), "snelste"), kpi(fmtDur(t.worst), "traagste")),
+      kpi(t.n, "rondes"), kpi(fmtDur(t.avg), "gemiddeld"), kpi(fmtDur(t.best), "snelste")),
     h("h3", {}, "Per gang"),
     table(["Gang", "Rondes", "Lopers", "Gem.", "Snelste", "Totaal"],
       st.gangs.map((g) => [g.gang || "(geen)", g.n, g.runners, fmtDur(g.avg), fmtDur(g.best), fmtClock(g.total)])),

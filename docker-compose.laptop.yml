@@ -1,0 +1,16 @@
+# Laptop ter plaatse: bereikbaar vanaf het lokale netwerk (gsm's, tv), backups naar een USB-stick
+# en een publieke export in data/public/ die sync/push.sh naar de thuisserver stuurt.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.laptop.yml up -d --build
+#
+# Of zet in .env:  COMPOSE_FILE=docker-compose.yml:docker-compose.laptop.yml
+services:
+  24urenloop:
+    ports: !override
+      - "8080:8080"
+    environment:
+      PUBLIC_DIR: /data/public
+      BACKUP_DIR: /backups
+    volumes:
+      # Pad naar de USB-stick, bv. BACKUP_PATH=/run/media/axl/USB/24urenloop
+      - ${BACKUP_PATH:-./data/backups}:/backups

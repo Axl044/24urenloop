@@ -42,7 +42,8 @@ class ApiTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         port = free_port()
         env = dict(os.environ, DB_PATH=os.path.join(self.tmp.name, "t.db"), PORT=str(port), HOST="127.0.0.1",
-                   TELLER_PIN="1111", ADMIN_PIN="2222", MIN_LAP_SECONDS="1", UNDO_SECONDS="60", BACKUP_MINUTES="0")
+                   TELLER_PIN="1111", ADMIN_PIN="2222", MIN_LAP_SECONDS="1", UNDO_SECONDS="60", BACKUP_MINUTES="0",
+                   PUBLIC_DIR=os.path.join(self.tmp.name, "public"), PUBLIC_SECONDS="1")
         self.proc = subprocess.Popen([sys.executable, os.path.join(ROOT, "server.py")], env=env,
                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         self.base = f"http://127.0.0.1:{port}"
@@ -162,6 +163,45 @@ class ApiTest(unittest.TestCase):
         _, s = self.teller.call("/api/state")
         self.assertEqual(s["current"]["seq"], 2)
         self.assertEqual(s["laps_done"], 1)
+
+    def test_public_scoreboard(self):
+        anon = Client(self.base)
+        self.setup_runners(["Ann", "Bob", "Cas"])
+        self.admin.call("/api/admin/start", {})
+        time.sleep(1.1)
+        self.teller.call("/api/pass", {"id": "p1"})
+
+        st, page = anon.call("/scorebord")
+        self.assertEqual(st, 200)
+        self.assertIn("scorebord.json", page)
+        st, sb = anon.call("/scorebord.json")
+        self.assertEqual(st, 200)
+        self.assertEqual(sb["state"], "running")
+        self.assertEqual(sb["current"]["name"], "Bob")
+        self.assertEqual([r["name"] for r in sb["next"]], ["Cas"])
+        self.assertEqual(sb["recent"][0]["name"], "Ann")
+        self.assertEqual(sb["stats"]["total"]["n"], 1)
+        self.assertNotIn("id", sb["current"])
+        self.assertNotIn("queue", sb)
+        # Anoniem blijft alles behalve het scorebord dicht
+        self.assertEqual(anon.call("/api/stats")[0], 401)
+        self.assertEqual(anon.call("/api/pass", {"id": "x"})[0], 401)
+
+        # Export voor de publieke site
+        pub = os.path.join(self.tmp.name, "public")
+        for _ in range(30):
+            try:
+                with open(os.path.join(pub, "scorebord.json")) as f:
+                    data = json.load(f)
+                if data["laps_done"] == 1:
+                    break
+            except (OSError, ValueError):
+                pass
+            time.sleep(0.1)
+        self.assertEqual(data["current"]["name"], "Bob")
+        with open(os.path.join(pub, "index.html")) as f:
+            self.assertIn("scorebord.json", f.read())
+        self.assertEqual(sorted(os.listdir(pub)), ["index.html", "scorebord.json"])
 
 
 if __name__ == "__main__":
