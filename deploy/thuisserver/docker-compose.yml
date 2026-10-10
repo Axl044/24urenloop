@@ -1,0 +1,24 @@
+# Publieke, alleen-lezen site op de thuisserver: nginx serveert enkel index.html + scorebord.json
+# (gepusht door sync/push.sh), cloudflared zet die online via de Cloudflare Tunnel.
+#
+#   cd deploy/thuisserver && TUNNEL_ID=<uuid> docker compose up -d
+#
+# De tunnel-credentials staan in ~/.cloudflared/<TUNNEL_ID>.json (van `cloudflared tunnel create`).
+services:
+  web:
+    image: nginx:1-alpine
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/var/cache/nginx, /var/run]
+    volumes:
+      - ${PUBLIC_DIR:-${HOME}/24urenloop-public}:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+  tunnel:
+    image: cloudflare/cloudflared:2026.10.0
+    restart: unless-stopped
+    user: "${UID:-1000}:${GID:-1000}"   # moet het credentials-bestand (chmod 400) kunnen lezen
+    command: tunnel --no-autoupdate run --credentials-file /creds.json --url http://web:80 ${TUNNEL_ID:?zet TUNNEL_ID}
+    volumes:
+      - ${HOME}/.cloudflared/${TUNNEL_ID}.json:/creds.json:ro
+    depends_on: [web]

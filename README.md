@@ -37,7 +37,7 @@ gsm (teller) ──wifi──▶ laptop :8080 ──▶ data/public/{index.html,
 tv / beamer  ──wifi──▶ laptop :8080/scorebord          │
                                                        │ sync/push.sh (rsync over Tailscale)
                                                        ▼
-                                   thuisserver: Caddy/nginx serveert enkel die 2 bestanden
+                                   thuisserver: nginx serveert enkel die 2 bestanden, via Cloudflare Tunnel
 ```
 
 ### 1. Laptop
@@ -57,37 +57,25 @@ docker compose up -d --build
 
 De laptop pusht met rsync over ssh, via Tailscale. Op de thuisserver komt dus geen sync-endpoint en geen app, enkel een map met bestanden.
 
-Op de thuisserver, eenmalig:
+Op de thuisserver staan nginx (alleen GET, alleen die 2 bestanden) en cloudflared in `deploy/thuisserver/`. De Cloudflare Tunnel wijst naar nginx, niet naar de app:
 
 ```bash
-sudo useradd -m -s /bin/sh deploy
-sudo install -d -o deploy -m 755 /srv/24urenloop-public
+mkdir -p ~/24urenloop-public
+cd deploy/thuisserver && TUNNEL_ID=<uuid van de tunnel> docker compose up -d
 ```
 
-Zet de publieke sleutel van de laptop in `~deploy/.ssh/authorized_keys`, beperkt tot rsync in die ene map (`rrsync` zit bij rsync):
+De tunnel-credentials komen uit `~/.cloudflared/<TUNNEL_ID>.json` (`cloudflared tunnel create`). Beide containers herstarten vanzelf na een reboot.
+
+De laptop krijgt een eigen ssh-sleutel die enkel in die map mag schrijven (`rrsync` zit bij rsync), in `~/.ssh/authorized_keys` op de thuisserver:
 
 ```
-command="rrsync /srv/24urenloop-public",restrict ssh-ed25519 AAAA... laptop-24urenloop
-```
-
-Op oudere Debian/Ubuntu staat rrsync in `/usr/share/doc/rsync/scripts/` in plaats van in het `PATH`.
-
-Caddy serveert de map, enkel om te lezen. Dit vervangt de reverse proxy van hierboven: de app zelf staat dan niet meer online.
-
-```
-24urenloop.axlquirijnen.be {
-    root * /srv/24urenloop-public
-    @write not method GET HEAD
-    respond @write 405
-    header /scorebord.json Cache-Control "no-cache"
-    file_server
-}
+command="rrsync -wo /home/axl/24urenloop-public",restrict ssh-ed25519 AAAA... 24urenloop-push
 ```
 
 Op de laptop (met Tailscale verbonden):
 
 ```bash
-SYNC_TARGET=deploy@thuisserver: ./sync/push.sh
+SYNC_TARGET=axl@webserver: SYNC_KEY=~/.ssh/24urenloop_push ./sync/push.sh
 ```
 
 Het script pusht elke 15 s (`SYNC_SECONDS`) en blijft opnieuw proberen als het internet wegvalt. Het scorebord toont hoe oud de gegevens zijn, en waarschuwt als ze ouder zijn dan 2 minuten.
